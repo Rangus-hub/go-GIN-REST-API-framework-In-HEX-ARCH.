@@ -1,0 +1,173 @@
+package main
+
+import (
+	"fmt"
+	"net/http"
+
+	"github.com/gin-gonic/gin"
+	"github.com/jackc/pgx/v4"
+)
+
+const (
+	host     = "localhost"
+	port     = 5432
+	user     = "postgres"
+	password = "postgres"
+	dbname   = "fga"
+)
+
+var (
+	conn *pgx.Conn
+	err  error
+)
+
+func main() {
+	connectionQuery := fmt.Sprintf("host=%s port=%d user=%s password=%s dbname=%s sslmode=disable", host, port, user, password, dbname)
+
+	conn, err = pgx.Connect(context.Background(), connectionQuery)
+	if err != nil {
+		panic(err)
+	}
+
+	defer conn.Close(context.Background())
+
+	fmt.Printf("Connected to PostgreSQL database: %s\n", dbname)
+
+	router := gin.Default()
+	router.GET("/books", GetAllBooks)
+	router.POST("/books", CreateBook)
+	router.PUT("/books/:id", UpdateBook)
+	router.GET("/books/:id", GetBookByID)
+	router.DELETE("/books/:id", DeleteBook)
+
+	router.Run(":8080")
+}
+
+type Book struct {
+	ID          int    `json:"id"`
+	Title       string `json:"title"`
+	Author      string `json:"author"`
+	Description string `json:"description"`
+}
+
+func GetAllBooks(c *gin.Context) {
+	var books []Book
+	getAllBooksQuery := `select * from books`
+
+	rows, err := conn.Query(context.Background(), getAllBooksQuery)
+	if err != nil {
+		panic(err)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var book Book
+
+		err = rows.Scan(&book.ID, &book.Title, &book.Author, &book.Description)
+		if err != nil {
+			panic(err)
+		}
+
+		books = append(books, book)
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"books": books,
+	})
+}
+
+func CreateBook(c *gin.Context) {
+	var newBook Book
+	var insertedBook Book
+
+	if err := c.ShouldBindJSON(&newBook); err != nil {
+		c.AbortWithError(http.StatusBadRequest, err)
+		return
+	}
+
+	insertBookQuery := `insert into books (title, author, description)
+						values ($1, $2, $3)
+						returning *`
+
+	err = conn.QueryRow(context.Background(), insertBookQuery, newBook.Title, newBook.Author, newBook.Description).Scan(&insertedBook.ID, &insertedBook.Title, &insertedBook.Author, &insertedBook.Description)
+
+	if err != nil {
+		panic(err)
+	}
+
+	c.JSON(http.StatusCreated, gin.H{
+		"book": insertedBook,
+	})
+}
+
+func UpdateBook(c *gin.Context) {
+	bookID := c.Param("id")
+	var updateBook Book
+
+	if err := c.ShouldBindJSON(&updateBook); err != nil {
+		c.AbortWithError(http.StatusBadRequest, err)
+		return
+	}
+
+	updateBookQuery := `update books
+					set title = $2, author = $3, description = $4
+					where id = $1;`
+
+	res, err := conn.Exec(context.Background(), updateBookQuery, bookID, updateBook.Title, updateBook.Author, updateBook.Description)
+	if err != nil {
+		panic(err)
+	}
+
+	count := res.RowsAffected()
+	if count < 1 {
+		c.AbortWithStatusJSON(http.StatusNotFound, gin.H{
+			"message": fmt.Sprintf("Book with id %v is not found", bookID),
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"message": fmt.Sprintf("%v row affected. Book with id %v has been successfully updated", count, bookID),
+	})
+}
+
+func GetBookByID(c *gin.Context) {
+	bookID := c.Param("id")
+	var book Book
+
+	getBookQuery := `select * from books where id = $1;`
+
+	err = conn.QueryRow(context.Background(), getBookQuery, bookID).Scan(&book.ID, &book.Title, &book.Author, &book.Description)
+	if err != nil {
+		c.AbortWithStatusJSON(http.StatusNotFound, gin.H{
+			"message": fmt.Sprintf("Book with id %v is not found", bookID),
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"book": book,
+	})
+}
+
+func DeleteBook(c *gin.Context) {
+	bookID := c.Param("id")
+	deleteBookQuery := `delete from books where id = $1;`
+
+	res, err := conn.Exec(context.Background(), deleteBookQuery, bookID)
+	if err != nil {
+		panic(err)
+	}
+
+	count := res.RowsAffected()
+	if count < 1 {
+		c.AbortWithStatusJSON(http.StatusNotFound, gin.H{
+			"message": fmt.Sprintf("Book with id %v is not found", bookID),
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"message": fmt.Sprintf("%v row affected. Book with id %v has been successfully deleted", count, bookID),
+	})
+}
